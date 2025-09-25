@@ -2,6 +2,7 @@
 
 ## Project Structure & Module Organization
 - `scripts/` holds Python utilities; `analyze_blue_ncc.py` runs colour-aware NCC diagnostics.
+- `tracker/` contains reusable NCC + colour-fusion tracking utilities shared across sequences.
 - `sequences/` stores raw frame data (`red/` and `blue/` subfolders with numbered JPEGs).
 - `analysis/` captures generated plots and overlays. Regenerate artifacts rather than committing large binaries when possible.
 - Root contains `project1.md` (assignment brief) and `AGENTS.md` (this guide). Add new modules in dedicated folders to keep the top level tidy.
@@ -26,11 +27,12 @@
 - Pull requests should summarize goals, list command outputs or artifacts produced, and reference assignment tasks. Include before/after imagery when altering tracking behaviour.
 
 ## Upcoming Implementation Plan
-1. Generalize the NCC + colour fusion tracker into a reusable module, parameterized for both sequences (shared template extraction utilities, search window controls, adaptive template updates).
-2. Build an evaluation script to iterate through each frame, log bounding boxes/scores, and export annotated videos or GIFs for the red and blue sequences.
-3. Add configurable confidence thresholds and fallback widening logic to handle occlusions or lighting shifts, with metrics reporting for frames lost or re-acquired.
-4. Integrate lightweight regression tests (e.g., assert high fused score on first frames) so future changes can be validated automatically.
-5. Document usage in `README`-style notes so new contributors can reproduce tracking runs and interpret the output quickly.
+1. Fix red-sequence detection in the existing analysis script so the initial bounding box locks onto the red car instead of roadside distractors; keep the logic script-scoped until behaviour is validated.
+2. Once red detection is stable, promote the improvements into the `tracker/` library so both sequences can reuse the shared implementation.
+3. Build an evaluation script to iterate through each frame, log bounding boxes/scores, and export annotated videos or GIFs for the red and blue sequences.
+4. Add configurable confidence thresholds and fallback widening logic to handle occlusions or lighting shifts, with metrics reporting for frames lost or re-acquired.
+5. Integrate lightweight regression tests (e.g., assert high fused score on first frames) so future changes can be validated automatically.
+6. Document usage in `README`-style notes so new contributors can reproduce tracking runs and interpret the output quickly.
 
 ## Agent-Specific Notes
 - Prefer reproducible scripts over notebooks for auditability. When generating large outputs, add them to `.gitignore` and note how to reproduce.
