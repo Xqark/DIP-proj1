@@ -5,3 +5,4 @@ sequences/
 .uv-cache/
 __pycache__/
 *.pyc
+.serena/
