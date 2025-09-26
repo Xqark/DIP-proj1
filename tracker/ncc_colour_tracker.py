@@ -7,7 +7,12 @@ import cv2
 import numpy as np
 
 from .colour_detection import ColourDetectorConfig
-from .fusion import compute_hsv_backprojection
+from .fusion import (
+    compute_hsv_backprojection,
+    compute_ncc_response,
+    detect_bbox_from_response,
+    resize_response_for_display,
+)
 from .types import BoundingBox
 from .utils import extract_patch
 
@@ -163,11 +168,17 @@ class NCCColourTracker:
         ):
             raise RuntimeError("Search window smaller than template—check search configuration.")
 
-        search_gray = cv2.cvtColor(search_patch, cv2.COLOR_BGR2GRAY).astype(np.float32)
-        template_gray = self.template_gray.astype(np.float32)
+        search_gray = cv2.cvtColor(search_patch, cv2.COLOR_BGR2GRAY)
+        search_gray32 = search_gray.astype(np.float32)
+        template_gray32 = self.template_gray.astype(np.float32)
 
-        ncc = cv2.matchTemplate(search_gray, template_gray, cv2.TM_CCOEFF_NORMED)
-        ncc_norm = cv2.normalize(ncc, None, 0.0, 1.0, cv2.NORM_MINMAX)
+        ncc = compute_ncc_response(search_gray32, template_gray32)
+        ncc_display = resize_response_for_display(
+            ncc,
+            search_gray.shape,
+            use_padding=True,
+        )
+        ncc_norm = cv2.normalize(ncc_display, None, 0.0, 1.0, cv2.NORM_MINMAX)
 
         if self.colour_config is not None:
             backproj_full = compute_hsv_backprojection(
@@ -191,19 +202,21 @@ class NCCColourTracker:
                 blur_kernel=self.config.backproj_blur,
             )
 
-        backproj_small = cv2.resize(
-            backproj_patch,
-            (ncc.shape[1], ncc.shape[0]),
-            interpolation=cv2.INTER_AREA,
+        fused = cv2.normalize(
+            ncc_norm.astype(np.float32) * backproj_patch.astype(np.float32),
+            None,
+            0.0,
+            1.0,
+            cv2.NORM_MINMAX,
         )
-
-        fused = (ncc_norm * backproj_small).astype(np.float32)
         _, fused_max, _, fused_loc = cv2.minMaxLoc(fused)
-        ncc_score = float(ncc[fused_loc[1], fused_loc[0]])
+        ncc_score = float(ncc_norm[fused_loc[1], fused_loc[0]])
 
+        local_bbox = detect_bbox_from_response(fused, self.template_shape)
+        local_top_left = local_bbox[0]
         abs_top_left = (
-            search_top_left[0] + fused_loc[0],
-            search_top_left[1] + fused_loc[1],
+            search_top_left[0] + local_top_left[0],
+            search_top_left[1] + local_top_left[1],
         )
         bbox = _clamp_bbox(abs_top_left, frame_bgr.shape, self.template_shape)
 
