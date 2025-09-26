@@ -7,7 +7,7 @@ from typing import Tuple
 import cv2
 import numpy as np
 
-BoundingBox = Tuple[Tuple[int, int], Tuple[int, int]]
+from .types import BoundingBox
 
 
 def _as_uint8_array(values: Tuple[int, int, int]) -> np.ndarray:
@@ -21,6 +21,7 @@ class ColourDetectorConfig:
     hsv_lower: Tuple[int, int, int]
     hsv_upper: Tuple[int, int, int]
     roi_y_fraction: Tuple[float, float] = (0.0, 1.0)
+    roi_x_fraction: Tuple[float, float] = (0.0, 1.0)
     min_area_frac: float = 0.001
     max_area_frac: float = 0.05
     target_hue: int | None = None
@@ -39,29 +40,27 @@ class ColourDetectorConfig:
         return _as_uint8_array(self.hsv_upper)
 
 
-def detect_colour_bbox(frame_bgr: np.ndarray, config: ColourDetectorConfig) -> BoundingBox:
-    """Locate the dominant colour region that corresponds to the target vehicle.
+def build_hsv_mask(frame_hsv: np.ndarray, config: ColourDetectorConfig) -> np.ndarray:
+    """Construct a binary mask selecting pixels within the configured HSV bands."""
 
-    The detection logic mirrors the exploratory script but exposes knobs so
-    callers can adapt to other colour schemes (e.g., the red sequence).
-    """
-
-    height, width = frame_bgr.shape[:2]
-    roi_y0 = int(config.roi_y_fraction[0] * height)
-    roi_y1 = int(config.roi_y_fraction[1] * height)
-
-    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-
-    base_mask = cv2.inRange(hsv, config.lower_array(), config.upper_array())
+    base_mask = cv2.inRange(frame_hsv, config.lower_array(), config.upper_array())
 
     for lower, upper in config.extra_ranges:
-        base_mask = cv2.bitwise_or(base_mask, cv2.inRange(hsv, _as_uint8_array(lower), _as_uint8_array(upper)))
+        base_mask = cv2.bitwise_or(base_mask, cv2.inRange(frame_hsv, _as_uint8_array(lower), _as_uint8_array(upper)))
+
+    height, width = base_mask.shape[:2]
+    roi_y0 = int(np.clip(config.roi_y_fraction[0], 0.0, 1.0) * height)
+    roi_y1 = int(np.clip(config.roi_y_fraction[1], 0.0, 1.0) * height)
+    roi_x0 = int(np.clip(config.roi_x_fraction[0], 0.0, 1.0) * width)
+    roi_x1 = int(np.clip(config.roi_x_fraction[1], 0.0, 1.0) * width)
+
+    if roi_y1 <= roi_y0:
+        roi_y0, roi_y1 = 0, height
+    if roi_x1 <= roi_x0:
+        roi_x0, roi_x1 = 0, width
 
     mask = np.zeros_like(base_mask)
-    if roi_y1 > roi_y0:
-        mask[roi_y0:roi_y1, :] = base_mask[roi_y0:roi_y1, :]
-    else:
-        mask = base_mask
+    mask[roi_y0:roi_y1, roi_x0:roi_x1] = base_mask[roi_y0:roi_y1, roi_x0:roi_x1]
 
     if config.median_kernel_size > 1:
         mask = cv2.medianBlur(mask, config.median_kernel_size)
@@ -79,6 +78,20 @@ def detect_colour_bbox(frame_bgr: np.ndarray, config: ColourDetectorConfig) -> B
             cv2.MORPH_CLOSE,
             np.ones((config.close_kernel_size, config.close_kernel_size), np.uint8),
         )
+
+    return mask
+
+
+def detect_colour_bbox(frame_bgr: np.ndarray, config: ColourDetectorConfig) -> BoundingBox:
+    """Locate the dominant colour region that corresponds to the target vehicle.
+
+    The detection logic mirrors the exploratory script but exposes knobs so
+    callers can adapt to other colour schemes (e.g., the red sequence).
+    """
+
+    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+    mask = build_hsv_mask(hsv, config)
+    height, width = mask.shape[:2]
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:

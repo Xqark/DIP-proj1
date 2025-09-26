@@ -15,21 +15,29 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from tracker import (  # noqa: E402
-    ColourDetectorConfig,
-    TrackerConfig,
-    detect_colour_bbox,
     NCCColourTracker,
+    SequenceConfig,
+    TrackerConfig,
+    build_default_sequence_configs,
+    compute_hsv_backprojection,
+    compute_ncc_response,
+    detect_bbox_from_response,
+    extract_template_from_sequence,
+    load_frame,
+    resize_response_for_display,
 )
 
 
 @dataclass(frozen=True)
 class SequenceRunConfig:
-    name: str
-    directory: Path
-    colour_config: ColourDetectorConfig
+    sequence: SequenceConfig
     initial_frame_index: int
     draw_color: Tuple[int, int, int]
     label: str
+
+    @property
+    def name(self) -> str:
+        return self.sequence.name
 
 
 @dataclass(slots=True)
@@ -73,22 +81,41 @@ def run_sequence(
     write_video: bool,
     video_fps: float,
 ) -> None:
-    frame_paths = sorted(config.directory.glob("*.jpg"))
+    sequence = config.sequence
+    frame_paths = sorted(sequence.directory.glob("*.jpg"))
     if not frame_paths:
-        raise FileNotFoundError(f"No frames found in {config.directory}")
+        raise FileNotFoundError(f"No frames found in {sequence.directory}")
 
     if config.initial_frame_index >= len(frame_paths):
         raise IndexError(
             f"Initial frame index {config.initial_frame_index} out of range for {config.name} sequence"
         )
 
-    initial_path = frame_paths[config.initial_frame_index]
-    initial_frame = cv2.imread(str(initial_path))
-    if initial_frame is None:
-        raise RuntimeError(f"Failed to load initial frame: {initial_path}")
+    initial_frame, initial_name = load_frame(sequence, config.initial_frame_index)
 
-    bbox = detect_colour_bbox(initial_frame, config.colour_config)
-    tracker = NCCColourTracker(initial_frame, bbox, tracker_config)
+    template_bgr = extract_template_from_sequence(sequence)
+    template_gray = cv2.cvtColor(template_bgr, cv2.COLOR_BGR2GRAY)
+
+    initial_gray = cv2.cvtColor(initial_frame, cv2.COLOR_BGR2GRAY)
+    ncc = compute_ncc_response(initial_gray, template_gray)
+    ncc_display = resize_response_for_display(ncc, initial_gray.shape)
+    ncc_display = cv2.normalize(ncc_display, None, 0.0, 1.0, cv2.NORM_MINMAX)
+
+    hsv_prob = compute_hsv_backprojection(initial_frame, template_bgr, sequence.colour_config)
+    fused = cv2.normalize(ncc_display * hsv_prob, None, 0.0, 1.0, cv2.NORM_MINMAX)
+
+    initial_top_left, initial_bottom_right = detect_bbox_from_response(fused, template_gray.shape)
+    initial_bbox = (initial_top_left, initial_bottom_right)
+
+    _, max_val, _, _ = cv2.minMaxLoc(ncc)
+    _, fused_max_val, _, _ = cv2.minMaxLoc(fused)
+
+    tracker = NCCColourTracker(
+        initial_frame,
+        initial_bbox,
+        tracker_config,
+        colour_config=sequence.colour_config,
+    )
 
     logs: List[FrameLog] = []
 
@@ -103,17 +130,30 @@ def run_sequence(
         if not video_writer.isOpened():
             raise RuntimeError(f"Could not open video writer for {video_path}")
 
-    for frame_idx in range(config.initial_frame_index, len(frame_paths)):
-        path = frame_paths[frame_idx]
-        frame = cv2.imread(str(path))
-        if frame is None:
-            raise RuntimeError(f"Failed to read frame: {path}")
+    initial_log = FrameLog(
+        frame_index=config.initial_frame_index,
+        frame_name=initial_name,
+        x0=initial_top_left[0],
+        y0=initial_top_left[1],
+        x1=initial_bottom_right[0],
+        y1=initial_bottom_right[1],
+        ncc_score=float(max_val),
+        fused_score=float(fused_max_val),
+    )
+    logs.append(initial_log)
 
+    overlay_text = f"{config.label} fused={initial_log.fused_score:.3f}"
+    annotated_initial = annotate_frame(initial_frame, initial_bbox, config.draw_color, overlay_text)
+    if video_writer is not None:
+        video_writer.write(annotated_initial)
+
+    for frame_idx in range(config.initial_frame_index + 1, len(frame_paths)):
+        frame, frame_name = load_frame(sequence, frame_idx)
         result = tracker.track(frame)
 
         log = FrameLog(
             frame_index=frame_idx,
-            frame_name=path.name,
+            frame_name=frame_name,
             x0=result.top_left[0],
             y0=result.top_left[1],
             x1=result.bottom_right[0],
@@ -158,48 +198,20 @@ def run_sequence(
 
 
 def build_sequence_configs(project_root: Path) -> dict[str, SequenceRunConfig]:
-    sequences_root = project_root / "sequences"
+    base_sequences = build_default_sequence_configs(project_root)
+    blue = base_sequences["blue"]
+    red = base_sequences["red"]
+
     return {
         "blue": SequenceRunConfig(
-            name="blue",
-            directory=sequences_root / "blue",
-            colour_config=ColourDetectorConfig(
-                hsv_lower=(100, 80, 70),
-                hsv_upper=(135, 255, 255),
-                roi_y_fraction=(0.25, 0.65),
-                min_area_frac=0.001,
-                max_area_frac=0.03,
-                target_hue=120,
-                median_kernel_size=5,
-                open_kernel_size=5,
-                close_kernel_size=13,
-                aspect_prior=1.5,
-                aspect_sigma=0.5,
-                margin_ratio=0.05,
-            ),
+            sequence=blue,
             initial_frame_index=90,
             draw_color=(0, 0, 255),
             label="Blue car",
         ),
         "red": SequenceRunConfig(
-            name="red",
-            directory=sequences_root / "red",
-            colour_config=ColourDetectorConfig(
-                hsv_lower=(0, 70, 60),
-                hsv_upper=(12, 255, 255),
-                extra_ranges=(((170, 70, 60), (180, 255, 255)),),
-                roi_y_fraction=(0.2, 0.75),
-                min_area_frac=0.001,
-                max_area_frac=0.04,
-                target_hue=0,
-                median_kernel_size=5,
-                open_kernel_size=5,
-                close_kernel_size=11,
-                aspect_prior=1.4,
-                aspect_sigma=0.4,
-                margin_ratio=0.05,
-            ),
-            initial_frame_index=0,
+            sequence=red,
+            initial_frame_index=red.default_frame_index,
             draw_color=(0, 255, 255),
             label="Red car",
         ),

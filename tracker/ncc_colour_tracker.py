@@ -6,7 +6,10 @@ from typing import Tuple
 import cv2
 import numpy as np
 
-BoundingBox = Tuple[Tuple[int, int], Tuple[int, int]]
+from .colour_detection import ColourDetectorConfig
+from .fusion import compute_hsv_backprojection
+from .types import BoundingBox
+from .utils import extract_patch
 
 
 @dataclass(frozen=True)
@@ -44,35 +47,6 @@ class TrackingResult:
     fused_score: float
     search_top_left: Tuple[int, int]
     search_bottom_right: Tuple[int, int]
-
-
-def extract_patch(frame: np.ndarray, top_left: Tuple[int, int], bottom_right: Tuple[int, int]) -> np.ndarray:
-    x0, y0 = top_left
-    x1, y1 = bottom_right
-    return frame[y0 : y1 + 1, x0 : x1 + 1]
-
-
-def _ensure_odd(kernel_size: int) -> int:
-    if kernel_size <= 1:
-        return 1
-    return kernel_size if kernel_size % 2 == 1 else kernel_size + 1
-
-
-def _compute_backprojection(
-    frame_bgr: np.ndarray,
-    template_bgr: np.ndarray,
-    hist_bins: Tuple[int, int],
-    blur_size: int,
-) -> np.ndarray:
-    frame_hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-    template_hsv = cv2.cvtColor(template_bgr, cv2.COLOR_BGR2HSV)
-    hist = cv2.calcHist([template_hsv], [0, 1], None, hist_bins, [0, 180, 0, 256])
-    cv2.normalize(hist, hist, 0, 255, cv2.NORM_MINMAX)
-    backproj = cv2.calcBackProject([frame_hsv], [0, 1], hist, [0, 180, 0, 256], scale=1)
-    blur_kernel = _ensure_odd(blur_size)
-    if blur_kernel > 1:
-        backproj = cv2.GaussianBlur(backproj, (blur_kernel, blur_kernel), 0)
-    return cv2.normalize(backproj, None, alpha=0.0, beta=1.0, norm_type=cv2.NORM_MINMAX)
 
 
 def _expand_bbox(
@@ -131,6 +105,8 @@ class NCCColourTracker:
         initial_frame_bgr: np.ndarray,
         initial_bbox: BoundingBox,
         config: TrackerConfig | None = None,
+        *,
+        colour_config: ColourDetectorConfig | None = None,
     ) -> None:
         if config is None:
             config = TrackerConfig()
@@ -141,6 +117,7 @@ class NCCColourTracker:
         self.template_gray = cv2.cvtColor(self.template_bgr, cv2.COLOR_BGR2GRAY)
         self.template_shape = self.template_gray.shape  # (rows, cols)
         self.prev_bbox = initial_bbox
+        self.colour_config = colour_config
 
     def reset_template(self, frame_bgr: np.ndarray, bbox: BoundingBox) -> None:
         """Replace the template with an externally provided bounding box."""
@@ -192,14 +169,30 @@ class NCCColourTracker:
         ncc = cv2.matchTemplate(search_gray, template_gray, cv2.TM_CCOEFF_NORMED)
         ncc_norm = cv2.normalize(ncc, None, 0.0, 1.0, cv2.NORM_MINMAX)
 
-        backproj = _compute_backprojection(
-            search_patch,
-            self.template_bgr,
-            self.config.backproj_hist_bins,
-            self.config.backproj_blur,
-        )
+        if self.colour_config is not None:
+            backproj_full = compute_hsv_backprojection(
+                frame_bgr,
+                self.template_bgr,
+                self.colour_config,
+                hist_bins=self.config.backproj_hist_bins,
+                blur_kernel=self.config.backproj_blur,
+            )
+            backproj_patch = extract_patch(
+                backproj_full,
+                search_top_left,
+                search_bottom_right,
+            )
+        else:
+            backproj_patch = compute_hsv_backprojection(
+                search_patch,
+                self.template_bgr,
+                None,
+                hist_bins=self.config.backproj_hist_bins,
+                blur_kernel=self.config.backproj_blur,
+            )
+
         backproj_small = cv2.resize(
-            backproj,
+            backproj_patch,
             (ncc.shape[1], ncc.shape[0]),
             interpolation=cv2.INTER_AREA,
         )

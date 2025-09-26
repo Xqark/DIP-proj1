@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import math
+import argparse
+import sys
 from pathlib import Path
 from typing import Tuple
 
@@ -8,116 +9,23 @@ import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 
-BLUE_DIR = Path(__file__).resolve().parent.parent / "sequences" / "blue"
-OUTPUT_DIR = Path(__file__).resolve().parent.parent / "analysis"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from tracker import (  # noqa: E402
+    build_default_sequence_configs,
+    compute_hsv_backprojection,
+    compute_ncc_response,
+    detect_bbox_from_response,
+    extract_template_from_sequence,
+    load_frame,
+    resize_response_for_display,
+)
+OUTPUT_DIR = PROJECT_ROOT / "analysis"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-# Narrower HSV band focused on saturated blue paint.
-HSV_BLUE_RANGE = (
-    np.array([100, 80, 70], dtype=np.uint8),
-    np.array([135, 255, 255], dtype=np.uint8),
-)
-
-# Expected contour area as a fraction of full frame.
-MIN_AREA_FRAC = 0.001
-MAX_AREA_FRAC = 0.03
-
-# Focus the colour search to the mid-band of the frame where the horizon sits.
-ROI_Y_FRACTION = (0.25, 0.65)
-
-
-def load_first_frame() -> Tuple[np.ndarray, str]:
-    frame_paths = sorted(BLUE_DIR.glob("*.jpg"))
-    if not frame_paths:
-        raise FileNotFoundError(f"No frames found in {BLUE_DIR}")
-    frame = cv2.imread(str(frame_paths[90]))
-    if frame is None:
-        raise RuntimeError(f"Failed to load {frame_paths[90]}")
-    return frame, frame_paths[90].name
-
-
-def detect_blue_bbox(frame_bgr: np.ndarray) -> Tuple[Tuple[int, int], Tuple[int, int]]:
-    h, w = frame_bgr.shape[:2]
-    roi_y0 = int(ROI_Y_FRACTION[0] * h)
-    roi_y1 = int(ROI_Y_FRACTION[1] * h)
-
-    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-
-    base_mask = cv2.inRange(hsv, HSV_BLUE_RANGE[0], HSV_BLUE_RANGE[1])
-    # Clip mask to the vertical band so the road (bottom rows) is suppressed.
-    mask = np.zeros_like(base_mask)
-    mask[roi_y0:roi_y1, :] = base_mask[roi_y0:roi_y1, :]
-
-    # Clean isolated noise, keep compact blobs.
-    mask = cv2.medianBlur(mask, 5)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((13, 13), np.uint8))
-
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        raise RuntimeError("Could not find blue region automatically; adjust HSV thresholds or provide manual bbox.")
-
-    frame_area = h * w
-    min_area = MIN_AREA_FRAC * frame_area
-    max_area = MAX_AREA_FRAC * frame_area
-
-    candidates: list[Tuple[float, np.ndarray]] = []
-    for contour in contours:
-        area = cv2.contourArea(contour)
-        if area < min_area or area > max_area:
-            continue
-        x, y, width, height = cv2.boundingRect(contour)
-        aspect = width / max(height, 1)
-        # Cars look wider than tall but not extremely elongated; penalize extremes.
-        aspect_penalty = math.exp(-((aspect - 1.5) ** 2) / 0.5)
-
-        # Compute average hue closeness to central blue (120°).
-        mask_roi = np.zeros((h, w), dtype=np.uint8)
-        cv2.drawContours(mask_roi, [contour], -1, color=255, thickness=cv2.FILLED)
-        hue = hsv[:, :, 0]
-        hue_diff = cv2.absdiff(hue, np.full_like(hue, 120))
-        mean_hue_diff = cv2.mean(hue_diff, mask=mask_roi)[0]
-        hue_score = math.exp(-(mean_hue_diff / 15.0) ** 2)
-
-        score = area * aspect_penalty * hue_score
-        candidates.append((score, contour))
-
-    if not candidates:
-        raise RuntimeError("Contours found, but none matched expected size/aspect—check thresholds.")
-
-    _, best = max(candidates, key=lambda item: item[0])
-    x, y, width, height = cv2.boundingRect(best)
-
-    margin = int(0.05 * max(width, height))
-    x0 = max(x - margin, 0)
-    y0 = max(y - margin, 0)
-    x1 = min(x + width + margin, w - 1)
-    y1 = min(y + height + margin, h - 1)
-    return (x0, y0), (x1, y1)
-
-
-def extract_patch(frame: np.ndarray, top_left: Tuple[int, int], bottom_right: Tuple[int, int]) -> np.ndarray:
-    x0, y0 = top_left
-    x1, y1 = bottom_right
-    return frame[y0 : y1 + 1, x0 : x1 + 1]
-
-
-def compute_ncc_response(image_gray: np.ndarray, template_gray: np.ndarray) -> np.ndarray:
-    return cv2.matchTemplate(image_gray, template_gray, cv2.TM_CCOEFF_NORMED)
-
-
-def resize_response_for_display(response: np.ndarray, target_shape: Tuple[int, int]) -> np.ndarray:
-    return cv2.resize(response, (target_shape[1], target_shape[0]), interpolation=cv2.INTER_CUBIC)
-
-
-def compute_hsv_backprojection(frame_bgr: np.ndarray, template_bgr: np.ndarray) -> np.ndarray:
-    frame_hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-    template_hsv = cv2.cvtColor(template_bgr, cv2.COLOR_BGR2HSV)
-    hist = cv2.calcHist([template_hsv], [0, 1], None, [30, 32], [0, 180, 0, 256])
-    cv2.normalize(hist, hist, 0, 255, cv2.NORM_MINMAX)
-    backproj = cv2.calcBackProject([frame_hsv], [0, 1], hist, [0, 180, 0, 256], scale=1)
-    backproj_blur = cv2.GaussianBlur(backproj, (31, 31), 0)
-    return cv2.normalize(backproj_blur, None, alpha=0.0, beta=1.0, norm_type=cv2.NORM_MINMAX)
+SEQUENCE_CONFIGS = build_default_sequence_configs(PROJECT_ROOT)
 
 
 def highlight_box(frame_bgr: np.ndarray, top_left: Tuple[int, int], bottom_right: Tuple[int, int]) -> np.ndarray:
@@ -138,32 +46,92 @@ def save_heatmap(data: np.ndarray, background: np.ndarray, title: str, filename:
     plt.close()
 
 
-def main() -> None:
-    frame_bgr, frame_name = load_first_frame()
-    top_left, bottom_right = detect_blue_bbox(frame_bgr)
-    template = extract_patch(frame_bgr, top_left, bottom_right)
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Analyse NCC + colour cues for a vehicle sequence.")
+    parser.add_argument(
+        "--sequence",
+        choices=sorted(SEQUENCE_CONFIGS.keys()),
+        default="blue",
+        help="Which sequence to analyse.",
+    )
+    parser.add_argument(
+        "--frame-index",
+        type=int,
+        default=None,
+        help="Optional frame index to analyse (defaults to sequence's tuned starting frame).",
+    )
+    parser.add_argument(
+        "--use-padding",
+        action="store_true",
+        help="Use zero-padding instead of interpolation for NCC response display.",
+    )
+    return parser.parse_args()
 
+
+def main() -> None:
+    args = parse_args()
+    sequence = SEQUENCE_CONFIGS[args.sequence]
+
+    # Load the current frame to analyze
+    frame_bgr, frame_name = load_frame(sequence, args.frame_index)
     frame_gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    
+    # Extract template from reference frame using ground truth bbox
+    template = extract_template_from_sequence(sequence)
     template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
 
+    # Compute NCC response between template and current frame
     ncc = compute_ncc_response(frame_gray, template_gray)
-    ncc_display = resize_response_for_display(ncc, frame_gray.shape)
+    ncc_display = resize_response_for_display(ncc, frame_gray.shape, use_padding=args.use_padding)
     ncc_display = cv2.normalize(ncc_display, None, 0.0, 1.0, cv2.NORM_MINMAX)
 
-    hsv_prob = compute_hsv_backprojection(frame_bgr, template)
+    # Compute HSV backprojection using the template
+    hsv_prob = compute_hsv_backprojection(frame_bgr, template, sequence.colour_config)
+    
+    # Fuse NCC and HSV responses
     fused = cv2.normalize(ncc_display * hsv_prob, None, 0.0, 1.0, cv2.NORM_MINMAX)
 
-    vis_bbox = highlight_box(frame_bgr, top_left, bottom_right)
+    # Detect bounding box in current frame based on fusion results
+    detected_top_left, detected_bottom_right = detect_bbox_from_response(fused, template_gray.shape)
+    vis_bbox = highlight_box(frame_bgr, detected_top_left, detected_bottom_right)
 
-    cv2.imwrite(str(OUTPUT_DIR / f"{frame_name}_bbox.png"), vis_bbox)
-    save_heatmap(ncc_display, frame_bgr, "Normalized cross-correlation", OUTPUT_DIR / f"{frame_name}_ncc_overlay.png")
-    save_heatmap(hsv_prob, frame_bgr, "HSV backprojection", OUTPUT_DIR / f"{frame_name}_hsv_overlay.png")
-    save_heatmap(fused, frame_bgr, "Fused NCC + colour", OUTPUT_DIR / f"{frame_name}_fused_overlay.png")
+    # Save visualizations
+    sequence_output_dir = OUTPUT_DIR / sequence.name
+    sequence_output_dir.mkdir(parents=True, exist_ok=True)
 
+    cv2.imwrite(str(sequence_output_dir / f"{frame_name}_bbox.png"), vis_bbox)
+    cv2.imwrite(str(sequence_output_dir / f"{frame_name}_template.png"), template)
+    save_heatmap(
+        ncc_display,
+        frame_bgr,
+        "Normalized cross-correlation",
+        sequence_output_dir / f"{frame_name}_ncc_overlay.png",
+    )
+    save_heatmap(
+        hsv_prob,
+        frame_bgr,
+        "HSV backprojection",
+        sequence_output_dir / f"{frame_name}_hsv_overlay.png",
+    )
+    save_heatmap(
+        fused,
+        frame_bgr,
+        "Fused NCC + colour",
+        sequence_output_dir / f"{frame_name}_fused_overlay.png",
+    )
+
+    # Print analysis results
     min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(ncc)
-    print(f"Detected template bbox (x0, y0) -> (x1, y1): {top_left} -> {bottom_right}")
+    _, fused_max_val, _, fused_max_loc = cv2.minMaxLoc(fused)
+    
+    print(f"Sequence: {sequence.name}")
+    print(f"Frame: {frame_name}")
+    print(f"Template extracted from frame {sequence.template_frame_index} at bbox {sequence.template_bbox}")
     print(f"Template size: {template.shape[1]} x {template.shape[0]}")
+    print(f"NCC display method: {'Zero-padding' if args.use_padding else 'Interpolation'}")
     print(f"Raw NCC max score: {max_val:.4f} at location (x={max_loc[0]}, y={max_loc[1]})")
+    print(f"Fused max score: {fused_max_val:.4f} at location (x={fused_max_loc[0]}, y={fused_max_loc[1]})")
+    print(f"Detected bbox in current frame: {detected_top_left} -> {detected_bottom_right}")
 
     fused_flat = fused.flatten()
     topk_idx = np.argsort(fused_flat)[-10:][::-1]
@@ -173,7 +141,7 @@ def main() -> None:
         y, x = divmod(idx, width)
         print(f"  {fused_flat[idx]:.4f}, {x}, {y}")
 
-    print(f"Artifacts saved to: {OUTPUT_DIR}")
+    print(f"Artifacts saved to: {sequence_output_dir}")
 
 
 if __name__ == "__main__":
