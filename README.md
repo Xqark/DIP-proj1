@@ -68,4 +68,5 @@ Artifacts appear under `analysis/<sequence>/` for the analysis script and `analy
 - Generated media (`analysis/` contents) should not be committed; keep runs reproducible by documenting command flags.
 - `scripts/analyze_blue_ncc.py`会全局分析一张图片，ncc的template用的是都是第一帧中bounding box截出来的。所以如果处理第200帧，因为车靠近了，ncc效果就不好
 - `scripts/evaluate_sequences.py`会处理全部图片然后输出视频，这个里面ncc的template是每次用前一帧的的bounding box截出来然后用`cv2.addWeighted`更新得到的。而且它每次只会分析前一帧bounding box附近的区域
-- 其实只用ncc就够了，不管颜色的也可以
+- 如果是`scripts/evaluate_sequences.py`其实只用ncc就够了，不管颜色的也可以。但是`scripts/analyze_blue_ncc.py`就颜色和ncc都要，因为它只用第一帧的template，车靠近后ncc不准确
+- `scripts/analyze_blue_ncc.py`名字有点怪，反正它就是HSV+NCC的，红色蓝色都能用，懒得改名了
