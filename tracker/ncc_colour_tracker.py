@@ -180,27 +180,14 @@ class NCCColourTracker:
         )
         ncc_norm = cv2.normalize(ncc_display, None, 0.0, 1.0, cv2.NORM_MINMAX)
 
-        if self.colour_config is not None:
-            backproj_full = compute_hsv_backprojection(
-                frame_bgr,
-                self.template_bgr,
-                self.colour_config,
-                hist_bins=self.config.backproj_hist_bins,
-                blur_kernel=self.config.backproj_blur,
-            )
-            backproj_patch = extract_patch(
-                backproj_full,
-                search_top_left,
-                search_bottom_right,
-            )
-        else:
-            backproj_patch = compute_hsv_backprojection(
-                search_patch,
-                self.template_bgr,
-                None,
-                hist_bins=self.config.backproj_hist_bins,
-                blur_kernel=self.config.backproj_blur,
-            )
+        backproj_patch = compute_hsv_backprojection(
+            search_patch,
+            self.template_bgr,
+            self.colour_config,
+            hist_bins=self.config.backproj_hist_bins,
+            blur_kernel=self.config.backproj_blur,
+        )
+            
 
         fused = cv2.normalize(
             ncc_norm.astype(np.float32) * backproj_patch.astype(np.float32),
